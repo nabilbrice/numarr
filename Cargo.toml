@@ -1,5 +1,5 @@
 [package]
-name = "sized_tensors"
+name = "numarr"
 version = "0.1.0"
 edition = "2021"
 
