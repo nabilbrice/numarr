@@ -1,9 +1,10 @@
-use core::ops::{AddAssign, SubAssign, MulAssign, DivAssign};
-use num_traits::{Float, Num, NumAssignOps, NumOps};
+use core::ops::{AddAssign, DivAssign, MulAssign, SubAssign};
 use num_traits::ops::mul_add::{MulAdd, MulAddAssign};
+use num_traits::{Float, Num, NumAssignOps, NumOps};
 use std::cmp::PartialEq;
 use std::default::Default;
 use std::marker::Copy;
+use std::mem::MaybeUninit;
 use std::ops;
 // for the unsasfe and fast dot product implementation
 use std::intrinsics::{fadd_fast, fmul_fast};
@@ -24,8 +25,7 @@ pub trait MulGroup<Rhs = Self, Output = Self> = Data
     + ops::Mul<Rhs, Output = Output>
     + ops::Div<Rhs, Output = Output>;
 
-pub trait FieldOps<Rhs = Self, Output = Self> =
-    AddGroup<Self, Self> + MulGroup<Self, Self>;
+pub trait FieldOps<Rhs = Self, Output = Self> = AddGroup<Self, Self> + MulGroup<Self, Self>;
 
 pub trait Data = Default + Clone + Copy + PartialEq + PartialOrd;
 
@@ -45,30 +45,26 @@ pub trait Data = Default + Clone + Copy + PartialEq + PartialOrd;
 // so it can hold itself.
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 #[repr(transparent)]
-pub struct NumArray<S: Data, const D: usize> {
-    components: [S; D],
-}
+pub struct NumArray<S: Data, const D: usize>([S; D]);
 
 // Cannot simply derive default at the moment so the manual implementation
 // is given.
 impl<S: Data, const D: usize> Default for NumArray<S, D> {
     fn default() -> Self {
-        NumArray {
-            components: [S::default(); D],
-        }
+        NumArray([S::default(); D])
     }
 }
 
 impl<S: Data, const D: usize> ops::Deref for NumArray<S, D> {
     type Target = [S; D];
     fn deref(&self) -> &Self::Target {
-        &self.components
+        &self.0
     }
 }
 
 impl<S: Data, const D: usize> ops::DerefMut for NumArray<S, D> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.components
+        &mut self.0
     }
 }
 
@@ -91,7 +87,7 @@ macro_rules! dimensions {
 #[macro_export]
 macro_rules! numarray {
     // For rank 1 numarrays only:
-    ($($e:literal),+) => {
+    [$($e:literal),+] => {
         NumArray::from([$($e),+])
     };
     // For rank 1 matching:
@@ -108,32 +104,20 @@ macro_rules! numarray {
 // by moving ownership of the array to the NumArray struct
 impl<S: Data, const D: usize> From<[S; D]> for NumArray<S, D> {
     fn from(array: [S; D]) -> NumArray<S, D> {
-        NumArray { components: array }
-    }
-}
-
-impl<S: Data, const D: usize> FromIterator<S> for NumArray<S, D> {
-    fn from_iter<I: IntoIterator<Item=S>>(iter: I) -> Self {
-        let mut output: [S; D];
-        // SAFETY: later initialised
-        unsafe { output = std::mem::uninitialized() };
-        for (elem_out, elem_iter) in output.iter_mut().zip(iter) {
-            *elem_out = elem_iter
-        }
-        NumArray::from(output)
+        NumArray(array)
     }
 }
 
 impl<S: Data, const D: usize> ops::Index<usize> for NumArray<S, D> {
     type Output = S;
     fn index(&self, index: usize) -> &S {
-        &self.components[index]
+        &self.0[index]
     }
 }
 
 impl<S: Data, const D: usize> ops::IndexMut<usize> for NumArray<S, D> {
     fn index_mut(&mut self, index: usize) -> &mut S {
-        &mut self.components[index]
+        &mut self.0[index]
     }
 }
 
@@ -142,8 +126,11 @@ impl<S: Data, const D: usize> ops::IndexMut<usize> for NumArray<S, D> {
 // makes it impossible to simply create a trait that generates the values.
 impl<S: AddGroup, const D: usize> ops::AddAssign<NumArray<S, D>> for NumArray<S, D> {
     fn add_assign(&mut self, rhs: NumArray<S, D>) {
-        self.iter_mut().zip(rhs.iter())
-            .for_each(|(mut out, rhs)| *out += *rhs)
+        // Only uses a reference iterator on rhs so the copy needs
+        // to be done while going through the iterator
+        self.iter_mut()
+            .zip(rhs.iter())
+            .for_each(|(elem_out, elem_rhs)| *elem_out += *elem_rhs)
     }
 }
 
@@ -196,8 +183,9 @@ impl<S: AddGroup, const D: usize> ops::Add<&NumArray<S, D>> for &NumArray<S, D> 
 
 impl<S: AddGroup, const D: usize> ops::SubAssign<NumArray<S, D>> for NumArray<S, D> {
     fn sub_assign(&mut self, rhs: NumArray<S, D>) {
-        self.iter_mut().zip(rhs.iter())
-            .for_each(|(mut out, rhs)| *out -= *rhs)
+        self.iter_mut()
+            .zip(rhs.into_iter())
+            .for_each(|(out, rhs)| *out -= rhs)
     }
 }
 
@@ -215,8 +203,9 @@ impl<S: AddGroup, const D: usize> ops::Sub<NumArray<S, D>> for NumArray<S, D> {
 // This is almost a dot product without the sum at the end.
 impl<S: MulGroup, const D: usize> ops::MulAssign<NumArray<S, D>> for NumArray<S, D> {
     fn mul_assign(&mut self, rhs: Self) {
-        self.iter_mut().zip(rhs.iter())
-            .for_each(|(elem_out, elem_rhs)| *elem_out *= *elem_rhs)
+        self.iter_mut()
+            .zip(rhs.into_iter())
+            .for_each(|(elem_out, elem_rhs)| *elem_out *= elem_rhs)
     }
 }
 
@@ -249,7 +238,8 @@ impl<S: MulGroup, const D: usize> ops::Mul<S> for NumArray<S, D> {
 
 impl<S: MulGroup, const D: usize> ops::DivAssign<NumArray<S, D>> for NumArray<S, D> {
     fn div_assign(&mut self, rhs: Self) {
-        self.iter_mut().zip(rhs.iter())
+        self.iter_mut()
+            .zip(rhs.iter())
             .for_each(|(elem_out, elem_rhs)| *elem_out /= *elem_rhs)
     }
 }
@@ -298,31 +288,32 @@ impl<S: Data + MulGroup + AddGroup, const D: usize> NumArray<S, D> {
     // This is a safe version for the dot product
     #[inline]
     pub fn dotprod(&self, rhs: &Self) -> S {
-        (*self * *rhs).iter().fold(S::default(), |acc, &elem| acc + elem)
+        (*self * *rhs)
+            .iter()
+            .fold(S::default(), |acc, &elem| acc + elem)
     }
 }
 
 // This is defined at least for one up since it requires the dotprod already.
 // Unless the dotprod is defined for S.
-impl<S: Data + MulGroup + AddGroup, const L: usize, const D: usize> NumArray<NumArray<S,L>, D>
-{
+impl<S: Data + MulGroup + AddGroup, const L: usize, const D: usize> NumArray<NumArray<S, L>, D> {
     #[inline]
-    pub fn matmul(&self, rhs: NumArray<S,L>) -> NumArray<S,L> {
-        let mut output = <NumArray<S,L>>::default();
-        output.iter_mut().zip(self.iter())
+    pub fn matmul(&self, rhs: NumArray<S, L>) -> NumArray<S, L> {
+        let mut output = <NumArray<S, L>>::default();
+        output
+            .iter_mut()
+            .zip(self.iter())
             .for_each(|(elem_out, row)| *elem_out = row.dotprod(&rhs));
         output
     }
 }
-
 
 // For tensors with the appropriate base type, i.e. a float,
 // there are additional functions available.
 impl<S: Data + FieldOps + Float, const D: usize> NumArray<S, D> {
     #[inline]
     pub fn norm2(&self) -> S {
-        self.iter()
-            .fold(S::default(), |acc, &s| s.mul_add(s, acc))
+        self.iter().fold(S::default(), |acc, &s| s.mul_add(s, acc))
     }
 
     #[inline]
@@ -410,10 +401,10 @@ mod tests {
         assert_eq!(second[2][1], 0.0);
 
         // Use the macro for generating a NumArray type:
-        let subgrid1 = numarray!(1.0,2.0);
-        let subgrid2 = numarray!([3.0,4.0]);
+        let subgrid1 = numarray![1.0, 2.0];
+        let subgrid2 = numarray!([3.0, 4.0]);
         let grid_composed = NumArray::from([subgrid1, subgrid2]);
-        let grid_directly = numarray!([1.0,2.0],[3.0,4.0]);
+        let grid_directly = numarray!([1.0, 2.0], [3.0, 4.0]);
 
         assert_eq!(grid_composed, grid_directly);
     }
@@ -421,9 +412,9 @@ mod tests {
     #[test]
     fn matmul_test() {
         let matrix = numarray!([1.0, 0.5], [0.0, 2.0]);
-        let vector = numarray!([3.0,4.0]);
+        let vector = numarray!([3.0, 4.0]);
 
-        let result = matrix.matmul(vector);
-        assert_eq!(result, numarray!([5.0,8.0]));
+        let result: NumArray<f32, 2> = matrix.iter().map(|row| row.dotprod(&vector)).collect();
+        assert_eq!(result, numarray!([5.0, 8.0]));
     }
 }
