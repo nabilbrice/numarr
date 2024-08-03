@@ -123,12 +123,12 @@ impl<S: Data, const D: usize> ops::IndexMut<usize> for NumArray<S, D> {
 
 impl<S: Data, const D: usize> FromIterator<S> for NumArray<S, D> {
     fn from_iter<I: IntoIterator<Item=S>>(iter: I) -> Self {
-        let mut output = [S::default(); D];
+        let mut output = NumArray::<S, D>::default();
         // SAFETY: later initialised
         for (elem_out, elem_iter) in output.iter_mut().zip(iter) {
             *elem_out = elem_iter;
         }
-        NumArray::from(output)
+        output
     }
 }
 
